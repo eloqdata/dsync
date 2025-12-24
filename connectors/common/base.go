@@ -93,7 +93,7 @@ func isMessageRetryable(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	// EloqDoc OCC and resource pressure retries are indicated via these tokens.
-	for _, token := range []string{"oom", "conflict", "retry", "abort", "transaction failed"} {
+	for _, token := range []string{"oom", "conflict", "retry", "abort", "transaction failed", "txerror"} {
 		if strings.Contains(msg, token) {
 			return true
 		}
