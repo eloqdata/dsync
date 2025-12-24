@@ -87,12 +87,52 @@ type connector struct {
 	limiter *rate.Limiter
 }
 
+func isMessageRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// EloqDoc OCC and resource pressure retries are indicated via these tokens.
+	for _, token := range []string{"oom", "conflict", "retry", "abort", "transaction failed"} {
+		if strings.Contains(msg, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func isRetryable(err error) bool {
 	if connectErr := new(connect.Error); errors.As(err, &connectErr) {
 		code := connectErr.Code()
-		return code == connect.CodeAborted || code == connect.CodeResourceExhausted || code == connect.CodeUnavailable || code == connect.CodeDeadlineExceeded
+		if code == connect.CodeAborted || code == connect.CodeResourceExhausted || code == connect.CodeUnavailable || code == connect.CodeDeadlineExceeded {
+			return true
+		}
 	}
-	return false
+	// Fall back to message-based retryability (case-insensitive substring checks).
+	return isMessageRetryable(err)
+}
+
+func newRetryBackoff(ctx context.Context) backoff.BackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxInterval = time.Second        // cap delay to 1s
+	bo.MaxElapsedTime = 0               // infinite retries
+	return backoff.WithContext(bo, ctx) // allow cancellation through context
+}
+
+func logRetryAttempt(attempt int, op string, namespace string, details map[string]any, err error) {
+	if attempt%100 != 0 {
+		return
+	}
+	args := []any{
+		"attempt", attempt,
+		"op", op,
+		"namespace", namespace,
+	}
+	for k, v := range details {
+		args = append(args, k, v)
+	}
+	args = append(args, "error", err)
+	slog.Info("retrying operation after failure", args...)
 }
 
 // GetConnectorStatus implements iface.Connector.
@@ -560,8 +600,10 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 					ns := iface.Namespace{Db: task.Def.Db, Col: task.Def.Col}
 					c.progressTracker.TaskStartedProgressUpdate(ns, task.Id)
 
-					backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+					backoffConfig := newRetryBackoff(c.flowCtx)
+					attempt := 0
 					err := backoff.Retry(func() error {
+						attempt++
 						if docs > 0 {
 							readerProgress.initialSyncDocs.Add(^uint64(docs - 1))
 							c.progressTracker.TaskInProgressUpdate(ns, int64(-docs))
@@ -583,6 +625,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 							}))
 							if err != nil {
 								if isRetryable(err) {
+									logRetryAttempt(attempt, "listData", sourceNamespace, map[string]any{"task": task.Id}, err)
 									slog.Debug("Retryable error encountered during ListData- retrying", "task", task.Id)
 									return err
 								} else {
@@ -607,6 +650,7 @@ func (c *connector) StartReadToChannel(flowId iface.FlowID, options iface.Connec
 								}))
 								if err != nil {
 									if isRetryable(err) {
+										logRetryAttempt(attempt, "transform", sourceNamespace, map[string]any{"task": task.Id, "batchSize": len(data)}, err)
 										slog.Debug("Retryable error encountered during transform- retrying", "task", task.Id)
 										return err
 									} else {
@@ -1085,8 +1129,10 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 					}
 				}
 				ns := dataMsg.Loc
-				backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+				backoffConfig := newRetryBackoff(c.flowCtx)
+				attempt := 0
 				if err := backoff.Retry(func() error {
+					attempt++
 					_, err := c.maybeOptimizedImpl.WriteUpdates(c.flowCtx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{
 						Namespace: ns,
 						Updates:   msgs,
@@ -1094,6 +1140,9 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 					}))
 					if err != nil && !isRetryable(err) {
 						return backoff.Permanent(err)
+					}
+					if err != nil {
+						logRetryAttempt(attempt, "writeUpdates", ns, map[string]any{"batchSize": len(msgs)}, err)
 					}
 					return err
 				}, backoffConfig); err != nil {
@@ -1107,8 +1156,10 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 					return err
 				}
 			}
-			backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+			backoffConfig := newRetryBackoff(c.flowCtx)
+			attempt := 0
 			if err := backoff.Retry(func() error {
+				attempt++
 				_, err := c.maybeOptimizedImpl.WriteData(c.flowCtx, connect.NewRequest(&adiomv1.WriteDataRequest{
 					Namespace: dataMsg.Loc,
 					Data:      dataMsg.DataBatch,
@@ -1116,6 +1167,9 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 				}))
 				if err != nil && !isRetryable(err) {
 					return backoff.Permanent(err)
+				}
+				if err != nil {
+					logRetryAttempt(attempt, "writeData", dataMsg.Loc, map[string]any{"batchSize": len(dataMsg.DataBatch)}, err)
 				}
 				return err
 			}, backoffConfig); err != nil {
@@ -1150,8 +1204,10 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 			}
 		}
 		ns := dataMsgs[0].Loc
-		backoffConfig := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+		backoffConfig := newRetryBackoff(c.flowCtx)
+		attempt := 0
 		if err := backoff.Retry(func() error {
+			attempt++
 			_, err := c.impl.WriteUpdates(c.flowCtx, connect.NewRequest(&adiomv1.WriteUpdatesRequest{
 				Namespace: ns,
 				Updates:   msgs,
@@ -1159,6 +1215,9 @@ func (c *connector) ProcessDataMessages(dataMsgs []iface.DataMessage) error {
 			}))
 			if err != nil && !isRetryable(err) {
 				return backoff.Permanent(err)
+			}
+			if err != nil {
+				logRetryAttempt(attempt, "writeUpdates", ns, map[string]any{"batchSize": len(msgs)}, err)
 			}
 			return err
 		}, backoffConfig); err != nil {
