@@ -1,45 +1,55 @@
-name: Build artifacts for release
+name: Release
 
-# Trigger on a new release
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 permissions:
-  contents: write  # Ensuring the GITHUB_TOKEN has write permissions to contents
+  contents: write
 
 jobs:
-  build:
+  release:
+    name: Build and Release
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.22
-    - name: Build binaries for multiple platforms
-      run: |
-        platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
-        for platform in "${platforms[@]}"
-        do
-          os_arch=(${platform//\// })
-          GOOS=${os_arch[0]}
-          GOARCH=${os_arch[1]}
-          output_name=dsync-$GOOS-$GOARCH
-          env GOOS=$GOOS GOARCH=$GOARCH go build -o $output_name
-        done
-    - name: Create a README with instructions
-      run: echo "# Dsync Binary\nChoose and run the dsync binary based on your architecture.\nRefer to the docs for more info at docs.adiom.io" > README.md
-    - name: Archive binaries and README
-      run: |
-        zip dsync-${{ github.ref_name }}.zip dsync-* README.md
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./dsync-${{ github.ref_name }}.zip
-        asset_name: dsync-${{ github.ref_name }}.zip
-        asset_content_type: application/zip
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          
+          for platform in "${platforms[@]}"; do
+            os_arch=(${platform//\// })
+            GOOS=${os_arch[0]}
+            GOARCH=${os_arch[1]}
+            
+            output_name="dsync-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              output_name+=".exe"
+            fi
+            
+            echo "Building for $GOOS/$GOARCH..."
+            env GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "dist/$output_name" .
+          done
+
+      - name: Generate Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

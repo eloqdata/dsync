@@ -1,5 +1,15 @@
 **Welcome to Adiom's Dsync GitHub Repository!**
 
+## EloqData Fork
+
+This repository is a fork of [dsync](https://github.com/adiom-data/dsync) maintained by EloqData to better support EloqDoc.
+
+### Version Correspondence
+
+| EloqData Version | Upstream Dsync Version |
+| ---------------- | ---------------------- |
+| v0.0.1           | v0.22.0                |
+
 _Complete documentation can be found [here](https://docs.adiom.io)_
 
 We solve data migration and replication between databases. We focus on challenges specific to large datasets and mission-critical applications. Our mission is to make database migration and replication easy for engineers and DevOps, reducing the need for custom solutions.
