@@ -841,10 +841,12 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 				}
 			}
 		} else {
-			// check if the error is a BSONObjectTooLarge error
-			// there could be edge cases such as all documents causing duplicate key errors and server's writeError response gets larger than 16MB
-			// we will recursively split the batch in half and try again
-			if isBSONObjectTooLargeError(bwErr) {
+			if mongo.IsDuplicateKeyError(bwErr) {
+				for _, doc := range documents {
+					id := doc.(bson.Raw).Lookup("_id")
+					bulkOverwrite = append(bulkOverwrite, mongo.NewReplaceOneModel().SetFilter(bson.M{"_id": id}).SetReplacement(doc).SetUpsert(true))
+				}
+			} else if isBSONObjectTooLargeError(bwErr) {
 				slog.Debug(fmt.Sprintf("Bulk write failed due to BSON object too large: %v", bwErr))
 				mid := len(documents) / 2
 				err := insertBatchOverwrite(ctx, collection, documents[:mid])
@@ -858,10 +860,10 @@ func insertBatchOverwrite(ctx context.Context, collection *mongo.Collection, doc
 					return err
 				}
 				return nil
+			} else {
+				slog.Error(fmt.Sprintf("Bulk write failed: %v", bwErr))
+				return bwErr
 			}
-
-			slog.Error(fmt.Sprintf("Bulk write failed: %v", bwErr))
-			return bwErr
 		}
 
 		// redo them all as a bulk replace
