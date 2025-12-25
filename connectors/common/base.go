@@ -93,7 +93,7 @@ func isMessageRetryable(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	// EloqDoc OCC and resource pressure retries are indicated via these tokens.
-	for _, token := range []string{"oom", "conflict", "retry", "abort", "transaction failed", "txerror"} {
+	for _, token := range []string{"oom", "out of memory", "conflict", "retry", "abort", "transaction failed", "txerror"} {
 		if strings.Contains(msg, token) {
 			return true
 		}
@@ -120,7 +120,7 @@ func newRetryBackoff(ctx context.Context) backoff.BackOff {
 }
 
 func logRetryAttempt(attempt int, op string, namespace string, details map[string]any, err error) {
-	if attempt%100 != 0 {
+	if attempt%10000 != 0 {
 		return
 	}
 	args := []any{
@@ -131,7 +131,7 @@ func logRetryAttempt(attempt int, op string, namespace string, details map[strin
 	for k, v := range details {
 		args = append(args, k, v)
 	}
-	args = append(args, "error", err)
+	args = append(args, "warning", err)
 	slog.Info("retrying operation after failure", args...)
 }
 
